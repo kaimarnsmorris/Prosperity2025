@@ -10,13 +10,73 @@ import base64
 from datetime import datetime
 import re
 import traceback
+import json
 from utils2 import DataHandler  # Using your DataHandler class
+class ExtendedDataHandler(DataHandler):
+    @staticmethod
+    def load_log_file(file_path) -> tuple:
+        """Extended load_log_file that also transfers sandbox data to prices dataframe"""
+        # Load data using original method
+        sandbox_logs, prices_df, trades_df = DataHandler.load_log_file(file_path)
+        
+        # Merge sandbox data into prices dataframe if possible
+        if not sandbox_logs.empty and not prices_df.empty:
+            # For each sandbox log
+            for _, log in sandbox_logs.iterrows():
+                # Skip if no sandboxLog or timestamp
+                if 'sandboxLog' not in log or not log['sandboxLog'] or 'timestamp' not in log:
+                    continue
+                
+                # Try to extract data between equals signs in sandboxLog
+                try:
+                    # Extract data between equals signs using regex
+                    data_str = re.search(r'=(.*?)(?=\n|$)', log['sandboxLog'])
+                    if data_str:
+                        data_json = json.loads(data_str.group(1))
+                        
+                        # Find rows in prices_df with matching timestamp
+                        timestamp = log['timestamp']
+                        matching_rows = prices_df[prices_df['timestamp'] == timestamp].index
+                        
+                        if not matching_rows.empty:
+                            # For each product in the extracted data
+                            for product, product_data in data_json.items():
+                                # Find matching product rows
+                                for idx in matching_rows:
+                                    if 'product' in prices_df.columns and prices_df.at[idx, 'product'].upper() == product.upper():
+                                        # Add each property from product_data to the price entry
+                                        for key, value in product_data.items():
+                                            prices_df.at[idx, key] = value
+                except Exception as e:
+                    print(f"Error processing sandbox log: {e}")
+                    print(traceback.format_exc())
+        
+        return sandbox_logs, prices_df, trades_df
 
 # Initialize the Dash app
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
 
+# Define client-side callback to trigger file upload when Browse button is clicked
+app.clientside_callback(
+    """
+    function(n_clicks) {
+        if (n_clicks) {
+            // Find the upload component and simulate click
+            const uploadElement = document.getElementById('upload-log-file');
+            if (uploadElement) {
+                uploadElement.click();
+            }
+        }
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output("log-file-input", "disabled"),  # Dummy output that won't actually update
+    [Input("browse-button", "n_clicks")],
+    prevent_initial_call=True,
+)
+
 # Default log file
-default_log_file = DataHandler.get_most_recent_log()
+default_log_file = ExtendedDataHandler.get_most_recent_log()
 
 # App Layout
 app.layout = dbc.Container([
@@ -26,13 +86,28 @@ app.layout = dbc.Container([
         ], width=12)
     ]),
     
-    # File Selection Row - Simplified to just input and browse button
+    # File Selection Row - With file upload component
     dbc.Row([
         dbc.Col([
             dbc.InputGroup([
                 dbc.InputGroupText("Log File:"),
                 dbc.Input(id="log-file-input", value=default_log_file, placeholder="Select log file..."),
                 dbc.Button("Browse", id="browse-button", color="primary"),
+                dcc.Upload(
+                    id='upload-log-file',
+                    children=html.Div(['Drag and Drop or ', html.A('Select a Log File')]),
+                    style={
+                        'width': '100%',
+                        'height': '38px',
+                        'lineHeight': '38px',
+                        'borderWidth': '1px',
+                        'borderStyle': 'dashed',
+                        'borderRadius': '5px',
+                        'textAlign': 'center',
+                        'marginLeft': '10px'
+                    },
+                    multiple=False
+                ),
             ], className="mb-3"),
         ], width=12)
     ]),
@@ -53,7 +128,9 @@ app.layout = dbc.Container([
         dbc.Col([
             html.H4("Order Book", className="text-center mb-2"),
             html.Div(id="timestamp-display", className="text-center mb-2"),
-            html.Div(id="order-book-display", style={"height": "450px", "overflowY": "auto"})
+            html.Div(id="order-book-display", style={"height": "250px", "overflowY": "auto"}),
+            html.H4("Sandbox Logs", className="text-center mb-2 mt-3"),
+            html.Div(id="sandbox-logs-display", style={"height": "180px", "overflowY": "auto", "fontFamily": "monospace", "whiteSpace": "pre-wrap"})
         ], width=3)
     ], className="mb-4"),
     
@@ -93,7 +170,8 @@ app.layout = dbc.Container([
     # Store components for data
     dcc.Store(id="prices-data-store"),
     dcc.Store(id="trades-data-store"),
-    dcc.Store(id="selected-timestamp-store")
+    dcc.Store(id="selected-timestamp-store"),
+    dcc.Store(id="sandbox-logs-store")
 ], fluid=True)
 
 # Define callbacks
@@ -101,36 +179,138 @@ app.layout = dbc.Container([
 @app.callback(
     [Output("prices-data-store", "data"),
      Output("trades-data-store", "data"),
+     Output("sandbox-logs-store", "data"),
      Output("product-dropdown", "options"),
      Output("left-axis-dropdown", "options"),
      Output("right-axis-dropdown", "options"),
      Output("product-dropdown", "value")],
-    [Input("log-file-input", "value")]
+    [Input("log-file-input", "value"),
+     Input("upload-log-file", "contents")],
+    [State("upload-log-file", "filename")]
 )
-def load_data(log_file_path):
+def load_data(log_file_path, upload_contents, upload_filename):
+    ctx = callback_context
+    trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
+    
+    # Handle file upload if that's what triggered the callback
+    if trigger_id == "upload-log-file" and upload_contents is not None:
+        content_type, content_string = upload_contents.split(',')
+        decoded = base64.b64decode(content_string)
+        
+        # Create a temporary file
+        temp_file = f"temp_{upload_filename}"
+        with open(temp_file, 'wb') as f:
+            f.write(decoded)
+        
+        log_file_path = temp_file
+    
     # If no log file specified or doesn't exist, use default
     if not log_file_path or not os.path.exists(log_file_path):
-        log_file_path = DataHandler.get_most_recent_log()
+        log_file_path = ExtendedDataHandler.get_most_recent_log()
         if not log_file_path:
             # No valid log file available
-            return None, None, [], [], [], None
+            return None, None, None, [], [], [], None
     
     # Load the log file
     try:
         print(f"Loading log file: {log_file_path}")
-        s, prices_df, trades_df = DataHandler.load_log_file(log_file_path)
-        print(f"Loaded data: {len(prices_df)} price records, {len(trades_df)} trade records")
+        sandbox_logs, prices_df, trades_df = ExtendedDataHandler.load_log_file(log_file_path)
+        print(f"Loaded data: {len(prices_df)} price records, {len(trades_df)} trade records, {len(sandbox_logs)} sandbox logs")
+        
+        # Calculate position for each product based on trades
+        if not trades_df.empty:
+            print("Calculating positions from trades...")
+            
+            # Ensure required columns exist
+            if 'symbol' in trades_df.columns and 'quantity' in trades_df.columns and 'timestamp' in trades_df.columns:
+                
+                # Get all unique products
+                products_list = prices_df['product'].unique().tolist() if 'product' in prices_df.columns else []
+                
+                # Initialize position column with zeros
+                if 'product' in prices_df.columns:
+                    prices_df['position'] = 0
+                    
+                    # OPTIMIZATION: Calculate positions at each timestamp in a separate dataframe
+                    # Sort trades chronologically
+                    sorted_trades = trades_df.sort_values('timestamp')
+                    
+                    # Create a dictionary to track running positions
+                    positions = {product: 0 for product in products_list}
+                    
+                    # Create a dictionary to store position changes by product and timestamp
+                    # Format: {product: {timestamp: position}}
+                    position_timeline = {product: {} for product in products_list}
+                    
+                    # Process trades to build position timeline
+                    for _, trade in sorted_trades.iterrows():
+                        symbol = trade['symbol']
+                        quantity = float(trade['quantity']) if pd.notna(trade['quantity']) else 0
+                        timestamp = trade['timestamp']
+                        
+                        # Skip if product not in our list
+                        if symbol not in positions:
+                            continue
+                        
+                        # Update position based on trade
+                        if 'buyer' in trade and trade['buyer'] == 'SUBMISSION':
+                            positions[symbol] += quantity
+                        
+                        if 'seller' in trade and trade['seller'] == 'SUBMISSION':
+                            positions[symbol] -= quantity
+                        
+                        # Record the updated position at this timestamp
+                        position_timeline[symbol][timestamp] = positions[symbol]
+                    
+                    # Now efficiently apply these positions to the prices dataframe
+                    if 'timestamp' in prices_df.columns:
+                        # For each product, find all its prices rows and apply positions
+                        for product in products_list:
+                            # Skip if no position changes for this product
+                            if not position_timeline[product]:
+                                continue
+                            
+                            # Get dataframe slice for this product
+                            product_mask = prices_df['product'] == product
+                            product_df = prices_df.loc[product_mask]
+                            
+                            if product_df.empty:
+                                continue
+                            
+                            # For each price row, find the most recent position
+                            for idx, row in product_df.iterrows():
+                                time = row['timestamp']
+                                
+                                # Find the most recent position update before or at this timestamp
+                                # This is the position at this point in time
+                                current_position = 0
+                                for trade_time, position in sorted(position_timeline[product].items()):
+                                    if trade_time <= time:
+                                        current_position = position
+                                    else:
+                                        break
+                                
+                                # Apply the position to this row
+                                prices_df.at[idx, 'position'] = current_position
+                    
+                    print("Position calculation complete")
+                else:
+                    print("Cannot add position column - no 'product' column in prices dataframe")
+            else:
+                print("Cannot calculate positions - missing required columns in trades dataframe")
+            
     except Exception as e:
         print(f"Error loading log file: {e}")
         print(traceback.format_exc())
-        return None, None, [], [], [], None
+        return None, None, None, [], [], [], None
     
     if prices_df.empty:
-        return None, None, [], [], [], None
+        return None, None, None, [], [], [], None
     
     # Convert DataFrames to dictionaries for storage
     prices_dict = prices_df.to_dict('records')
     trades_dict = trades_df.to_dict('records') if not trades_df.empty else []
+    sandbox_logs_dict = sandbox_logs.to_dict('records') if not sandbox_logs.empty else []
     
     print(f"Prices DataFrame head:\n{prices_df.head()}")
     
@@ -165,15 +345,16 @@ def load_data(log_file_path):
         default_product = None
         print("No valid default product available")
     
-    return prices_dict, trades_dict, product_options, column_options, column_options, default_product
+    return prices_dict, trades_dict, sandbox_logs_dict, product_options, column_options, column_options, default_product
 
 @app.callback(
     Output("main-chart", "figure"),
     [Input("prices-data-store", "data"),
      Input("trades-data-store", "data"),
-     Input("product-dropdown", "value")]
+     Input("product-dropdown", "value"),
+     Input("selected-timestamp-store", "data")]
 )
-def update_main_chart(prices_data, trades_data, selected_product):
+def update_main_chart(prices_data, trades_data, selected_product, selected_timestamp):
     if not prices_data or not selected_product:
         return {
             "data": [],
@@ -296,7 +477,15 @@ def update_main_chart(prices_data, trades_data, selected_product):
                 text=sell_trades['quantity'] if 'quantity' in sell_trades.columns else ''
             ))
     
-    # Update layout
+    # Add vertical line at selected timestamp if available
+    if selected_timestamp is not None:
+        fig.add_vline(
+            x=selected_timestamp, 
+            line=dict(color='grey', width=1, dash='dash'),
+            opacity=0.7
+        )
+    
+    # Update layout with more top margin to avoid overlapping with title
     fig.update_layout(
         title=f"{selected_product} Market Data",
         xaxis_title="Timestamp",
@@ -304,7 +493,7 @@ def update_main_chart(prices_data, trades_data, selected_product):
         hovermode="closest",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         height=500,
-        margin=dict(l=40, r=40, t=60, b=40)
+        margin=dict(l=40, r=40, t=80, b=40)  # Increased top margin from 60 to 80
     )
     
     # Enable clicking on the chart
@@ -323,23 +512,20 @@ def update_selected_timestamp(click_data, prices_data, selected_product):
     if not click_data or not prices_data or not selected_product:
         return None, "No timestamp selected"
     
-    # Get timestamp from click
-    point_index = click_data['points'][0]['pointIndex']
-    x_value = click_data['points'][0]['x']
-    
-    # Convert dict back to DataFrame
-    prices_df = pd.DataFrame(prices_data)
-    
-    # Filter for selected product
-    product_prices = prices_df[prices_df['product'] == selected_product] if 'product' in prices_df.columns else prices_df
-    
-    # Get timestamp value
-    if 'timestamp' in product_prices.columns:
-        timestamp = product_prices.iloc[point_index]['timestamp'] if point_index < len(product_prices) else x_value
-    else:
-        timestamp = x_value
-    
-    return timestamp, f"Selected Timestamp: {timestamp}"
+    try:
+        # Get the direct x value from click - this is the timestamp
+        x_value = click_data['points'][0]['x']
+        print(f"Clicked point x value: {x_value}")
+        
+        # That's it! For both price lines and trade markers, the x value 
+        # is the timestamp we want to display
+        return x_value, f"Selected Timestamp: {x_value}"
+        
+    except Exception as e:
+        print(f"Error extracting timestamp: {e}")
+        print(traceback.format_exc())
+        # Fallback to whatever x value we can extract
+        return click_data['points'][0]['x'], f"Selected Timestamp: {click_data['points'][0]['x']}"
 
 @app.callback(
     Output("order-book-display", "children"),
@@ -357,12 +543,51 @@ def update_order_book(selected_timestamp, prices_data, selected_product):
     # Filter for selected product
     product_prices = prices_df[prices_df['product'] == selected_product] if 'product' in prices_df.columns else prices_df
     
+    if product_prices.empty:
+        return html.Div(f"No data available for product: {selected_product}")
+    
     # Find closest row to selected timestamp
+    closest_row = None
+    
     if 'timestamp' in product_prices.columns:
-        closest_row = product_prices.iloc[(product_prices['timestamp'] - selected_timestamp).abs().argsort()[0]]
-    else:
-        closest_idx = min(int(selected_timestamp), len(product_prices) - 1) if isinstance(selected_timestamp, (int, float)) else 0
-        closest_row = product_prices.iloc[closest_idx]
+        try:
+            # Convert both to numeric to avoid type comparison issues
+            timestamp_series = pd.to_numeric(product_prices['timestamp'], errors='coerce')
+            selected_timestamp_val = pd.to_numeric(pd.Series([selected_timestamp]), errors='coerce')[0]
+            
+            if pd.notna(selected_timestamp_val) and not timestamp_series.isna().all():
+                # Calculate absolute difference and find minimum
+                abs_diff = (timestamp_series - selected_timestamp_val).abs()
+                
+                if not abs_diff.empty:
+                    min_idx = abs_diff.idxmin()
+                    closest_row = product_prices.loc[min_idx]
+                    print(f"Found closest timestamp at index {min_idx}")
+                else:
+                    print("Timestamp difference calculation resulted in empty series")
+            else:
+                print(f"Invalid timestamp values: selected={selected_timestamp_val}, series has all NaN: {timestamp_series.isna().all()}")
+        except Exception as e:
+            print(f"Error finding timestamp: {e}")
+            print(traceback.format_exc())
+    
+    # If we couldn't find by timestamp, try by index
+    if closest_row is None:
+        try:
+            if isinstance(selected_timestamp, (int, float)):
+                closest_idx = min(int(selected_timestamp), len(product_prices) - 1)
+            else:
+                closest_idx = 0
+            closest_row = product_prices.iloc[closest_idx]
+            print(f"Using index-based selection: {closest_idx}")
+        except Exception as e:
+            print(f"Error using index selection: {e}")
+            print(traceback.format_exc())
+            return html.Div("Error retrieving order book data")
+    
+    # If we still couldn't get a row, return an error message
+    if closest_row is None:
+        return html.Div("Could not find matching data for the selected timestamp")
     
     # Extract bid and ask data
     bid_price_cols = [col for col in closest_row.index if col.startswith('bid_price_')]
@@ -502,22 +727,50 @@ def update_order_book(selected_timestamp, prices_data, selected_product):
     ])
 
 @app.callback(
-    Output("comparison-chart", "figure"),
+    [Output("comparison-chart", "figure"),
+     Output("left-axis-dropdown", "value"),
+     Output("right-axis-dropdown", "value"),
+     Output("left-products-dropdown", "value"),
+     Output("right-products-dropdown", "value")],
     [Input("prices-data-store", "data"),
      Input("left-axis-dropdown", "value"),
      Input("right-axis-dropdown", "value"),
      Input("left-products-dropdown", "value"),
-     Input("right-products-dropdown", "value")]
+     Input("right-products-dropdown", "value"),
+     Input("product-dropdown", "options")]
 )
-def update_comparison_chart(prices_data, left_column, right_column, left_products, right_products):
+def update_comparison_chart(prices_data, left_column, right_column, left_products, right_products, product_options):
+    ctx = callback_context
+    triggered = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
+    
+    # Set default values if this is the first load or if product options changed
+    first_load = triggered in [None, "prices-data-store", "product-dropdown"]
+    
+    # Convert options to list of product values
+    all_products = [opt["value"] for opt in product_options if isinstance(opt, dict) and "value" in opt and opt["value"]]
+    
+    # Set default values if first load
+    if first_load:
+        # Set default columns
+        default_left = "profit_and_loss" if prices_data and pd.DataFrame(prices_data).get('profit_and_loss', pd.Series()).notna().any() else None
+        default_right = "position" if prices_data and pd.DataFrame(prices_data).get('position', pd.Series()).notna().any() else None
+        
+        left_column = default_left if default_left is not None else left_column
+        right_column = default_right if default_right is not None else right_column
+        
+        # Set all products by default
+        left_products = all_products if all_products and default_left is not None else left_products
+        right_products = all_products if all_products and default_right is not None else right_products
+    
     if not prices_data:
-        return {
+        empty_fig = {
             "data": [],
             "layout": {
                 "title": "No data available",
                 "height": 400
             }
         }
+        return empty_fig, left_column, right_column, left_products, right_products
     
     # Convert dict back to DataFrame
     prices_df = pd.DataFrame(prices_data)
@@ -527,7 +780,10 @@ def update_comparison_chart(prices_data, left_column, right_column, left_product
     
     # Add traces for left axis
     if left_column and left_products:
-        for product in left_products:
+        # Generate different colors for each product
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+        
+        for i, product in enumerate(left_products):
             product_data = prices_df[prices_df['product'] == product] if 'product' in prices_df.columns else prices_df
             if not product_data.empty and left_column in product_data.columns:
                 fig.add_trace(go.Scatter(
@@ -535,13 +791,17 @@ def update_comparison_chart(prices_data, left_column, right_column, left_product
                     y=product_data[left_column],
                     mode='lines',
                     name=f"{product} - {left_column}",
-                    line=dict(width=2),
+                    line=dict(width=2, color=colors[i % len(colors)]),
                     hovertemplate=f'{product} {left_column}: %{{y:.2f}}<br>Index: %{{x}}'
                 ))
     
     # Add traces for right axis
     if right_column and right_products:
-        for product in right_products:
+        # Generate different dash patterns for each product
+        dash_patterns = ['solid', 'dash', 'dot', 'dashdot', 'longdash', 'longdashdot']
+        colors = ['#ff7f0e', '#1f77b4', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+        
+        for i, product in enumerate(right_products):
             product_data = prices_df[prices_df['product'] == product] if 'product' in prices_df.columns else prices_df
             if not product_data.empty and right_column in product_data.columns:
                 fig.add_trace(go.Scatter(
@@ -549,14 +809,14 @@ def update_comparison_chart(prices_data, left_column, right_column, left_product
                     y=product_data[right_column],
                     mode='lines',
                     name=f"{product} - {right_column}",
-                    line=dict(width=2, dash='dash'),
+                    line=dict(width=2, dash=dash_patterns[i % len(dash_patterns)], color=colors[i % len(colors)]),
                     yaxis="y2",
                     hovertemplate=f'{product} {right_column}: %{{y:.2f}}<br>Index: %{{x}}'
                 ))
     
     # Update layout with dual y-axes
     fig.update_layout(
-        title="Comparison Chart",
+        title="Performance Metrics",
         xaxis_title="Timestamp",
         yaxis=dict(
             title=left_column if left_column else "",
@@ -577,7 +837,7 @@ def update_comparison_chart(prices_data, left_column, right_column, left_product
         margin=dict(l=40, r=40, t=60, b=40)
     )
     
-    return fig
+    return fig, left_column, right_column, left_products, right_products
 
 @app.callback(
     [Output("left-products-dropdown", "options"),

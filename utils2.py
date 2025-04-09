@@ -138,6 +138,8 @@ class DataHandler:
         list_of_files = glob.glob(f'{folder}/*')
         return max(list_of_files, key=os.path.getctime) if list_of_files else None
 
+class TimeSeriesAnalysis:
+    pass
 
 if __name__ == "__main__":
     # Example usage

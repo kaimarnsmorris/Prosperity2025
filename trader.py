@@ -24,6 +24,7 @@ def get_weighted_mid_price(order_depth: OrderDepth) -> float:
 class Trader:
     def __init__(self):
         self.data = {}
+        self.log = {}
 
     def trade_resin(self, state: TradingState, threshold=2, max_hedge_displacement=1.4) -> List[Order]:
         theo = 10000
@@ -133,7 +134,10 @@ class Trader:
 
 
 
-
+        self.log["KELP"] = {
+            "theo": theo,
+            "pos": pos
+        }
 
         # OLD STRATEGY
         WINDOW_STARFRUIT = 8 # 6
@@ -202,6 +206,9 @@ class Trader:
         
         # Serialize data to traderData
         traderData = jsonpickle.encode(self.data)
-        
+
+        # output self.log in json format
+        print(f"={jsonpickle.encode(self.log)}=")
+                  
         conversions = 1
         return result, conversions, traderData
