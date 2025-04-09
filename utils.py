@@ -23,7 +23,7 @@ def load_log_file(file_path):
     assert len(sections) == 3, "Expected 3 sections in the log file"
 
     sandbox_logs = parse_sandbox_logs(sections[0])
-    activities_log = parse_order_books(sections[1])
+    activities_log = parse_prices(sections[1])
     trade_history = parse_trade_history(sections[2])
     
     return sandbox_logs, activities_log, trade_history
@@ -46,7 +46,7 @@ def parse_sandbox_logs(logs_text):
         print(f"JSON Decode Error: {e}")
         return pd.DataFrame(columns=['sandboxLog', 'lambdaLog', 'timestamp'])
 
-def parse_order_books(activities_text):
+def parse_prices(activities_text):
     """Parse activities log into a DataFrame with proper types."""
     lines = activities_text.strip().split('\n')
     header = lines[0].split(';')
@@ -95,6 +95,10 @@ def read_market_data(file_path):
         if col.startswith('bid_price') or col.startswith('ask_price') or col == 'mid_price':
             df[col] = pd.to_numeric(df[col], errors='coerce')
     return df
+
+
+
+
 
 def add_engineered_features(df):
     """

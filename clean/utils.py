@@ -5,6 +5,7 @@ import glob
 import json
 import re
 import plotly.graph_objects as go
+from io import StringIO
 
 
 
@@ -12,7 +13,7 @@ class DataHandler:
 
     # -- Data Loading Functions --
     @staticmethod
-    def load_log_file(file_path) -> pd.DataFrame:
+    def load_log_file(file_path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """Load and parse a log file into three dataframes (sandbox_logs, activities_log, trade_history)."""
         with open(file_path, 'r') as file:
             content = file.read()
@@ -21,109 +22,136 @@ class DataHandler:
         sections = re.split(r'\n\n+(?:Sandbox logs:|Activities log:|Trade History:)\n', content)
         assert len(sections) == 3, "Expected 3 sections in the log file"
 
+        # extract day as first column 3 lines into Activities log (before semicolon)
+        day = int(sections[1].split('\n')[3].split(';')[0].split('_')[-1])
+
         sandbox_logs = DataHandler.parse_sandbox_logs(sections[0])
         prices_log = DataHandler.parse_prices(sections[1])
-        trade_history = DataHandler.parse_trade_history(sections[2])
+        trade_history = DataHandler.parse_trade_history(sections[2], day=day, input_format='json')
 
         return sandbox_logs, prices_log, trade_history
 
     @staticmethod
-    def load_historical_round(round_num, base_dir="round-{}-island-data-bottle") -> pd.DataFrame:
-        """Load historical data for a given round number. Will return two dataframes: prices and trades (concatenated from the three days)."""
-
+    def load_historical_round(round_num, base_dir="round-{}-island-data-bottle") -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Load historical data for a given round number and return two DataFrames: prices and trades."""
         round_dir = base_dir.format(round_num)
 
-        price_pattern = os.path.join(round_dir, f"prices_round_{round_num}_day_*.csv")
-        trade_pattern = os.path.join(round_dir, f"trade_history_round_{round_num}_day_*.json")
-        price_files = glob.glob(price_pattern)
-        trade_files = glob.glob(trade_pattern)
+        # Use glob to find files matching the patterns
+        price_files = glob.glob(os.path.join(round_dir, f"prices_round_{round_num}_day_*.csv"))
+        trade_files = glob.glob(os.path.join(round_dir, f"trades_round_{round_num}_day_*.csv"))
+        days = [int(file.split('_')[-1].split('.')[0]) for file in price_files]
+
         assert len(price_files) == len(trade_files), "Mismatch in number of price and trade files"
 
-        prices_dfs = []
-        for file in price_files:
-            with open(file, 'r') as file:
-                content = file.read()
-
-            df = DataHandler.parse_prices(content)
-            prices_dfs.append(df)
-
-        prices_df = pd.concat(prices_dfs, ignore_index=True)
+        prices_df = DataHandler.concat_ordered(
+            [DataHandler.parse_prices(open(file).read()) for file in price_files],
+        )
         
-        trades_dfs = []
-        for file in trade_files:
-            with open(file, 'r') as file:
-                content = file.read()
-
-            df = DataHandler.parse_trade_history(content)
-            trades_dfs.append(df)
-
-        trades_df = pd.concat(trades_dfs, ignore_index=True)
+        trades_df = DataHandler.concat_ordered(
+            [DataHandler.parse_trade_history(open(trade_files[i]).read(), day=days[i], input_format='csv') for i in range(len(trade_files))],
+        )
 
         return prices_df, trades_df
+
         
 
     # -- Parsing Functions --
     @staticmethod
-    def parse_sandbox_logs(logs_text):
+    def parse_sandbox_logs(logs_text) -> pd.DataFrame:
         """Parse sandbox logs section into a DataFrame."""
         logs_text = logs_text.replace('Sandbox logs:\n','').strip()
-        logs_text = re.sub(r'}\s*\n\s*{', '},{', logs_text)
         
-        if not logs_text.startswith('['): logs_text = '[' + logs_text
-        if not logs_text.endswith(']'): logs_text = logs_text + ']'
-        
-        try:
-            log_entries = json.loads(logs_text)
-            for entry in log_entries:
-                if 'lambdaLog' in entry and entry['lambdaLog']:
-                    entry['parsed_lambda'] = entry['lambdaLog']
-            return pd.DataFrame(log_entries)
-        except json.JSONDecodeError as e:
-            print(f"JSON Decode Error: {e}")
-            return pd.DataFrame(columns=['sandboxLog', 'lambdaLog', 'timestamp'])
+        # Add square brackets and comma separation to make it a valid JSON array
+        logs_text = re.sub(r'}\s*{', '},{', logs_text.strip())
+        if not logs_text.startswith('['):
+            logs_text = '[' + logs_text
+        if not logs_text.endswith(']'):
+            logs_text = logs_text + ']'
+
+        log_entries = json.loads(logs_text)
+
+        # Add a parsed_lambda column if 'lambdaLog' exists
+        for entry in log_entries:
+            if 'lambdaLog' in entry and entry['lambdaLog']:
+                entry['parsed_lambda'] = entry['lambdaLog']
+
+        # Convert to a pandas DataFrame
+        return pd.DataFrame(log_entries)
 
     @staticmethod
-    def parse_prices(activities_text):
+    def parse_prices(activities_text) -> pd.DataFrame:
         """Parse activities log into a DataFrame with proper types."""
-        lines = activities_text.strip().split('\n')
-        header = lines[0].split(';')
+        df = pd.read_csv(StringIO(activities_text), sep=';')
         
-        data = []
-        for line in lines[1:]:
-            if line.strip():
-                values = line.split(';')
-                data.append(values)
-        
-        df = pd.DataFrame(data, columns=header)
-        
-        for col in df.columns:
-            if col != "product":
-                df[col] = pd.to_numeric(df[col], errors='coerce')
+        # Convert all columns except 'product' to numeric
+        df.iloc[:, 1:] = df.iloc[:, 1:].apply(pd.to_numeric, errors='coerce')
         
         return df
 
     @staticmethod
-    def parse_trade_history(trade_text):
+    def parse_trade_history(trade_text, day=None, input_format='json') -> pd.DataFrame:
         """Parse trade history JSON into a DataFrame."""
-        trades = json.loads(trade_text)
-        df = pd.DataFrame(trades)
-        # Ensure numeric types
-        if 'timestamp' in df.columns:
-            df['timestamp'] = pd.to_numeric(df['timestamp'], errors='coerce')
-        if 'price' in df.columns:
-            df['price'] = pd.to_numeric(df['price'], errors='coerce')
-        if 'quantity' in df.columns:
-            df['quantity'] = pd.to_numeric(df['quantity'], errors='coerce')
-        return df
+        df = pd.DataFrame()
+        if input_format == 'json':
+            trades = json.loads(trade_text)
+            df = pd.DataFrame(trades)
+        elif input_format == 'csv':
+            # Handle CSV format if needed
+            df = pd.read_csv(StringIO(trade_text), sep=';')
+
+        df['timestamp'] = pd.to_numeric(df['timestamp'], errors='coerce')
+        df['price'] = pd.to_numeric(df['price'], errors='coerce')
+        df['quantity'] = pd.to_numeric(df['quantity'], errors='coerce')
+        df['day'] = day
+        columns_order = ['day'] + [col for col in df.columns if col != 'day']
+        
+        return df[columns_order]
 
 
+
+    # -- Other --
 
     @staticmethod
-    def get_most_recent_log():
+    def concat_ordered(dfs: list[pd.DataFrame]) -> pd.DataFrame:
+        """Combine multiple DataFrames into one sorted by day, thentimestamp."""
+        combined_df = pd.concat(dfs, ignore_index=True)
+        combined_df = combined_df.sort_values(by=['day', 'timestamp'], ascending=[True, True])
+
+        return combined_df
+
+    @staticmethod
+    def get_most_recent_log() -> str:
         """Returns the path to the most recently modified log file."""
-        list_of_files = glob.glob('logs/*')
+        list_of_files = glob.glob('submissions/*')
         return max(list_of_files, key=os.path.getctime) if list_of_files else None
 
 
 
+
+if __name__ == "__main__":
+    # Example usage
+    log_file_path = DataHandler.get_most_recent_log()
+    if log_file_path:
+        sandbox_logs, prices_log, trade_history = DataHandler.load_log_file(log_file_path)
+        print("Sandbox Logs:")
+        print(sandbox_logs.head())
+        print("\nPrices Log:")
+        print(prices_log.head())
+        # print column data types
+        print(prices_log.dtypes)
+        print("\nTrade History:")
+        print(trade_history.head())
+    else:
+        print("No log files found.")
+
+    # load historical data for round 1
+    round_num = 1
+    prices_df, trades_df = DataHandler.load_historical_round(round_num)
+    print("Prices DataFrame:")
+    print(prices_df.head())
+    print(prices_df.iloc[-100:])
+
+    print("\nTrades DataFrame:")
+    print(trades_df.head())
+    print(trades_df.iloc[-100:])
 
