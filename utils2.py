@@ -24,7 +24,7 @@ class DataHandler:
 
     # -- Data Loading Functions --
     @staticmethod
-    def load_log_file(file_path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    def load_log_file(file_path, convert_price_logs=False) -> tuple:
         """Load and parse a log file into three dataframes (sandbox_logs, activities_log, trade_history)."""
         with open(file_path, 'r') as file:
             content = file.read()
@@ -33,14 +33,72 @@ class DataHandler:
         sections = re.split(r'\n\n+(?:Sandbox logs:|Activities log:|Trade History:)\n', content)
         assert len(sections) == 3, "Expected 3 sections in the log file"
 
-        # extract day as first column 3 lines into Activities log (before semicolon)
+        # Extract day as first column 3 lines into Activities log (before semicolon)
         day = int(sections[1].split('\n')[3].split(';')[0].split('_')[-1])
 
+        # Parse the sections in parallel
         sandbox_logs = DataHandler.parse_sandbox_logs(sections[0])
         prices_log = DataHandler.parse_prices(sections[1])
         trade_history = DataHandler.parse_trade_history(sections[2], day=day, input_format='json')
+        
+        if convert_price_logs and not sandbox_logs.empty and 'lambdaLog' in sandbox_logs.columns:
+            # Pre-process sandbox logs to extract product data - this is more efficient
+            # than iterating through each row multiple times
+            processed_data = []
+            
+            for _, log_entry in sandbox_logs.iterrows():
+                if not log_entry.get('lambdaLog'):
+                    continue
+                    
+                log_ts = log_entry.get('timestamp')
+                if log_ts is None:
+                    continue
+                    
+                # Extract product data between equals signs
+                equals_matches = re.findall(r'=(.*?)=', log_entry['lambdaLog'], re.DOTALL)
+                for equals_data in equals_matches:
+                    try:
+                        product_data = json.loads(equals_data)
+                        if isinstance(product_data, dict):
+                            processed_data.append((log_ts, product_data))
+                    except (json.JSONDecodeError, Exception):
+                        continue
+            
+            if processed_data and 'timestamp' in prices_log.columns:
+                # Create lookup for prices_log timestamps to avoid repeated calculations
+                prices_log_timestamps = prices_log['timestamp'].values
+                product_set = set(prices_log['product'].values)
+                
+                # Create dictionary to store new column data
+                new_columns = {}
+                
+                # Process all the extracted data in a single pass
+                for log_ts, product_data in processed_data:
+                    # Find closest timestamp index once
+                    closest_idx = np.abs(prices_log_timestamps - log_ts).argmin()
+                    
+                    for product, data in product_data.items():
+                        if product not in product_set:
+                            continue
+                            
+                        if isinstance(data, dict):
+                            for key, value in data.items():
+                                col_name = key
+                                if col_name not in new_columns:
+                                    new_columns[col_name] = [None] * len(prices_log)
+                                new_columns[col_name][closest_idx] = value
+                        else:
+                            col_name = f"{product.lower()}_value"
+                            if col_name not in new_columns:
+                                new_columns[col_name] = [None] * len(prices_log)
+                            new_columns[col_name][closest_idx] = data
+                
+                # Add all new columns to prices_log at once
+                for col_name, values in new_columns.items():
+                    prices_log[col_name] = values
 
         return sandbox_logs, prices_log, trade_history
+
 
     @staticmethod
     def load_historical_round(round_num, base_dir="round-{}-island-data-bottle") -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -80,11 +138,6 @@ class DataHandler:
             logs_text = logs_text + ']'
 
         log_entries = json.loads(logs_text)
-
-        # Add a parsed_lambda column if 'lambdaLog' exists
-        for entry in log_entries:
-            if 'lambdaLog' in entry and entry['lambdaLog']:
-                entry['parsed_lambda'] = entry['lambdaLog']
 
         # Convert to a pandas DataFrame
         return pd.DataFrame(log_entries)
@@ -145,7 +198,7 @@ if __name__ == "__main__":
     # Example usage
     log_file_path = DataHandler.get_most_recent_log()
     if log_file_path:
-        sandbox_logs, prices_log, trade_history = DataHandler.load_log_file(log_file_path)
+        sandbox_logs, prices_log, trade_history = DataHandler.load_log_file(log_file_path, convert_price_logs=True)
         print("Sandbox Logs:")
         print(sandbox_logs.head())
         print("\nPrices Log:")

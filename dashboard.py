@@ -10,73 +10,13 @@ import base64
 from datetime import datetime
 import re
 import traceback
-import json
 from utils2 import DataHandler  # Using your DataHandler class
-class ExtendedDataHandler(DataHandler):
-    @staticmethod
-    def load_log_file(file_path) -> tuple:
-        """Extended load_log_file that also transfers sandbox data to prices dataframe"""
-        # Load data using original method
-        sandbox_logs, prices_df, trades_df = DataHandler.load_log_file(file_path)
-        
-        # Merge sandbox data into prices dataframe if possible
-        if not sandbox_logs.empty and not prices_df.empty:
-            # For each sandbox log
-            for _, log in sandbox_logs.iterrows():
-                # Skip if no sandboxLog or timestamp
-                if 'sandboxLog' not in log or not log['sandboxLog'] or 'timestamp' not in log:
-                    continue
-                
-                # Try to extract data between equals signs in sandboxLog
-                try:
-                    # Extract data between equals signs using regex
-                    data_str = re.search(r'=(.*?)(?=\n|$)', log['sandboxLog'])
-                    if data_str:
-                        data_json = json.loads(data_str.group(1))
-                        
-                        # Find rows in prices_df with matching timestamp
-                        timestamp = log['timestamp']
-                        matching_rows = prices_df[prices_df['timestamp'] == timestamp].index
-                        
-                        if not matching_rows.empty:
-                            # For each product in the extracted data
-                            for product, product_data in data_json.items():
-                                # Find matching product rows
-                                for idx in matching_rows:
-                                    if 'product' in prices_df.columns and prices_df.at[idx, 'product'].upper() == product.upper():
-                                        # Add each property from product_data to the price entry
-                                        for key, value in product_data.items():
-                                            prices_df.at[idx, key] = value
-                except Exception as e:
-                    print(f"Error processing sandbox log: {e}")
-                    print(traceback.format_exc())
-        
-        return sandbox_logs, prices_df, trades_df
 
 # Initialize the Dash app
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
 
-# Define client-side callback to trigger file upload when Browse button is clicked
-app.clientside_callback(
-    """
-    function(n_clicks) {
-        if (n_clicks) {
-            // Find the upload component and simulate click
-            const uploadElement = document.getElementById('upload-log-file');
-            if (uploadElement) {
-                uploadElement.click();
-            }
-        }
-        return window.dash_clientside.no_update;
-    }
-    """,
-    Output("log-file-input", "disabled"),  # Dummy output that won't actually update
-    [Input("browse-button", "n_clicks")],
-    prevent_initial_call=True,
-)
-
 # Default log file
-default_log_file = ExtendedDataHandler.get_most_recent_log()
+default_log_file = DataHandler.get_most_recent_log()
 
 # App Layout
 app.layout = dbc.Container([
@@ -86,28 +26,13 @@ app.layout = dbc.Container([
         ], width=12)
     ]),
     
-    # File Selection Row - With file upload component
+    # File Selection Row - Simplified to just input and browse button
     dbc.Row([
         dbc.Col([
             dbc.InputGroup([
                 dbc.InputGroupText("Log File:"),
                 dbc.Input(id="log-file-input", value=default_log_file, placeholder="Select log file..."),
                 dbc.Button("Browse", id="browse-button", color="primary"),
-                dcc.Upload(
-                    id='upload-log-file',
-                    children=html.Div(['Drag and Drop or ', html.A('Select a Log File')]),
-                    style={
-                        'width': '100%',
-                        'height': '38px',
-                        'lineHeight': '38px',
-                        'borderWidth': '1px',
-                        'borderStyle': 'dashed',
-                        'borderRadius': '5px',
-                        'textAlign': 'center',
-                        'marginLeft': '10px'
-                    },
-                    multiple=False
-                ),
             ], className="mb-3"),
         ], width=12)
     ]),
@@ -128,9 +53,7 @@ app.layout = dbc.Container([
         dbc.Col([
             html.H4("Order Book", className="text-center mb-2"),
             html.Div(id="timestamp-display", className="text-center mb-2"),
-            html.Div(id="order-book-display", style={"height": "250px", "overflowY": "auto"}),
-            html.H4("Sandbox Logs", className="text-center mb-2 mt-3"),
-            html.Div(id="sandbox-logs-display", style={"height": "180px", "overflowY": "auto", "fontFamily": "monospace", "whiteSpace": "pre-wrap"})
+            html.Div(id="order-book-display", style={"height": "450px", "overflowY": "auto"})
         ], width=3)
     ], className="mb-4"),
     
@@ -170,8 +93,7 @@ app.layout = dbc.Container([
     # Store components for data
     dcc.Store(id="prices-data-store"),
     dcc.Store(id="trades-data-store"),
-    dcc.Store(id="selected-timestamp-store"),
-    dcc.Store(id="sandbox-logs-store")
+    dcc.Store(id="selected-timestamp-store")
 ], fluid=True)
 
 # Define callbacks
@@ -179,43 +101,25 @@ app.layout = dbc.Container([
 @app.callback(
     [Output("prices-data-store", "data"),
      Output("trades-data-store", "data"),
-     Output("sandbox-logs-store", "data"),
      Output("product-dropdown", "options"),
      Output("left-axis-dropdown", "options"),
      Output("right-axis-dropdown", "options"),
      Output("product-dropdown", "value")],
-    [Input("log-file-input", "value"),
-     Input("upload-log-file", "contents")],
-    [State("upload-log-file", "filename")]
+    [Input("log-file-input", "value")]
 )
-def load_data(log_file_path, upload_contents, upload_filename):
-    ctx = callback_context
-    trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
-    
-    # Handle file upload if that's what triggered the callback
-    if trigger_id == "upload-log-file" and upload_contents is not None:
-        content_type, content_string = upload_contents.split(',')
-        decoded = base64.b64decode(content_string)
-        
-        # Create a temporary file
-        temp_file = f"temp_{upload_filename}"
-        with open(temp_file, 'wb') as f:
-            f.write(decoded)
-        
-        log_file_path = temp_file
-    
+def load_data(log_file_path):
     # If no log file specified or doesn't exist, use default
     if not log_file_path or not os.path.exists(log_file_path):
-        log_file_path = ExtendedDataHandler.get_most_recent_log()
+        log_file_path = DataHandler.get_most_recent_log()
         if not log_file_path:
             # No valid log file available
-            return None, None, None, [], [], [], None
+            return None, None, [], [], [], None
     
     # Load the log file
     try:
         print(f"Loading log file: {log_file_path}")
-        sandbox_logs, prices_df, trades_df = ExtendedDataHandler.load_log_file(log_file_path)
-        print(f"Loaded data: {len(prices_df)} price records, {len(trades_df)} trade records, {len(sandbox_logs)} sandbox logs")
+        s, prices_df, trades_df = DataHandler.load_log_file(log_file_path)
+        print(f"Loaded data: {len(prices_df)} price records, {len(trades_df)} trade records")
         
         # Calculate position for each product based on trades
         if not trades_df.empty:
@@ -302,15 +206,14 @@ def load_data(log_file_path, upload_contents, upload_filename):
     except Exception as e:
         print(f"Error loading log file: {e}")
         print(traceback.format_exc())
-        return None, None, None, [], [], [], None
+        return None, None, [], [], [], None
     
     if prices_df.empty:
-        return None, None, None, [], [], [], None
+        return None, None, [], [], [], None
     
     # Convert DataFrames to dictionaries for storage
     prices_dict = prices_df.to_dict('records')
     trades_dict = trades_df.to_dict('records') if not trades_df.empty else []
-    sandbox_logs_dict = sandbox_logs.to_dict('records') if not sandbox_logs.empty else []
     
     print(f"Prices DataFrame head:\n{prices_df.head()}")
     
@@ -345,16 +248,15 @@ def load_data(log_file_path, upload_contents, upload_filename):
         default_product = None
         print("No valid default product available")
     
-    return prices_dict, trades_dict, sandbox_logs_dict, product_options, column_options, column_options, default_product
+    return prices_dict, trades_dict, product_options, column_options, column_options, default_product
 
 @app.callback(
     Output("main-chart", "figure"),
     [Input("prices-data-store", "data"),
      Input("trades-data-store", "data"),
-     Input("product-dropdown", "value"),
-     Input("selected-timestamp-store", "data")]
+     Input("product-dropdown", "value")]
 )
-def update_main_chart(prices_data, trades_data, selected_product, selected_timestamp):
+def update_main_chart(prices_data, trades_data, selected_product):
     if not prices_data or not selected_product:
         return {
             "data": [],
@@ -477,14 +379,6 @@ def update_main_chart(prices_data, trades_data, selected_product, selected_times
                 text=sell_trades['quantity'] if 'quantity' in sell_trades.columns else ''
             ))
     
-    # Add vertical line at selected timestamp if available
-    if selected_timestamp is not None:
-        fig.add_vline(
-            x=selected_timestamp, 
-            line=dict(color='grey', width=1, dash='dash'),
-            opacity=0.7
-        )
-    
     # Update layout with more top margin to avoid overlapping with title
     fig.update_layout(
         title=f"{selected_product} Market Data",
@@ -506,9 +400,10 @@ def update_main_chart(prices_data, trades_data, selected_product, selected_times
      Output("timestamp-display", "children")],
     [Input("main-chart", "clickData")],
     [State("prices-data-store", "data"),
+     State("trades-data-store", "data"),
      State("product-dropdown", "value")]
 )
-def update_selected_timestamp(click_data, prices_data, selected_product):
+def update_selected_timestamp(click_data, prices_data, trades_data, selected_product):
     if not click_data or not prices_data or not selected_product:
         return None, "No timestamp selected"
     
