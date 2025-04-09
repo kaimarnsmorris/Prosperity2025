@@ -6,7 +6,18 @@ import json
 import re
 import plotly.graph_objects as go
 from io import StringIO
-
+import dash
+from dash import dcc, html, Input, Output, State, callback_context
+import dash_bootstrap_components as dbc
+from dash.exceptions import PreventUpdate
+import pandas as pd
+import plotly.graph_objects as go
+import numpy as np
+import os
+import base64
+from datetime import datetime
+import re
+import io
 
 
 class DataHandler:
@@ -120,38 +131,17 @@ class DataHandler:
         return combined_df
 
     @staticmethod
-    def get_most_recent_log() -> str:
+    def get_most_recent_log(folder='submissions') -> str:
         """Returns the path to the most recently modified log file."""
-        list_of_files = glob.glob('submissions/*')
+        list_of_files = glob.glob(f'{folder}/*')
         return max(list_of_files, key=os.path.getctime) if list_of_files else None
 
 
 
 
-if __name__ == "__main__":
-    # Example usage
-    log_file_path = DataHandler.get_most_recent_log()
-    if log_file_path:
-        sandbox_logs, prices_log, trade_history = DataHandler.load_log_file(log_file_path)
-        print("Sandbox Logs:")
-        print(sandbox_logs.head())
-        print("\nPrices Log:")
-        print(prices_log.head())
-        # print column data types
-        print(prices_log.dtypes)
-        print("\nTrade History:")
-        print(trade_history.head())
-    else:
-        print("No log files found.")
 
-    # load historical data for round 1
-    round_num = 1
-    prices_df, trades_df = DataHandler.load_historical_round(round_num)
-    print("Prices DataFrame:")
-    print(prices_df.head())
-    print(prices_df.iloc[-100:])
 
-    print("\nTrades DataFrame:")
-    print(trades_df.head())
-    print(trades_df.iloc[-100:])
+
+
+
 
