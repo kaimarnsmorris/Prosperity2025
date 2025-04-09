@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 
 # --- Log File Parsing Functions ---
 
-def most_recent_log():
+def get_most_recent_log():
     """Returns the path to the most recently modified log file."""
     list_of_files = glob.glob('logs/*')
     return max(list_of_files, key=os.path.getctime) if list_of_files else None
@@ -23,7 +23,7 @@ def load_log_file(file_path):
     assert len(sections) == 3, "Expected 3 sections in the log file"
 
     sandbox_logs = parse_sandbox_logs(sections[0])
-    activities_log = parse_activities_log(sections[1])
+    activities_log = parse_order_books(sections[1])
     trade_history = parse_trade_history(sections[2])
     
     return sandbox_logs, activities_log, trade_history
@@ -46,7 +46,7 @@ def parse_sandbox_logs(logs_text):
         print(f"JSON Decode Error: {e}")
         return pd.DataFrame(columns=['sandboxLog', 'lambdaLog', 'timestamp'])
 
-def parse_activities_log(activities_text):
+def parse_order_books(activities_text):
     """Parse activities log into a DataFrame with proper types."""
     lines = activities_text.strip().split('\n')
     header = lines[0].split(';')
@@ -177,7 +177,7 @@ def read_all_prices_data(round_num, base_dir="round-{}-island-data-bottle", incl
     
     # Append log data if requested
     if include_logs:
-        log_file = most_recent_log()
+        log_file = get_most_recent_log()
         if log_file:
             print(f"Including log data from {log_file}")
             _, activities_log, _ = load_log_file(log_file)
@@ -243,7 +243,7 @@ def read_all_trades_data(round_num, base_dir="round-{}-island-data-bottle", incl
     
     # Append log data if requested
     if include_logs:
-        log_file = most_recent_log()
+        log_file = get_most_recent_log()
         if log_file:
             print(f"Including trade history from {log_file}")
             _, _, trade_history = load_log_file(log_file)

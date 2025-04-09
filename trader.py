@@ -65,83 +65,112 @@ class Trader:
 
         return orders
 
-    def trade_kelp(self, state: TradingState, threshold=1., max_hedge_displacement=0.7) -> List[Order]:
+    def trade_kelp(self, state: TradingState, threshold=0.5, max_hedge_displacement=0.7) -> List[Order]:
+        # Get order depth for KELP
         order_depth = state.order_depths.get("KELP", OrderDepth())
+        
+        # Calculate current weighted mid price
         current_mid = get_weighted_mid_price(order_depth)
         
-        # Historical prices
+        # Initialize or retrieve historical prices from traderData
         if state.traderData:
             data = jsonpickle.decode(state.traderData)
-            historical_prices = data.get("kelp_prices", [])
+            if "kelp_prices" in data:
+                historical_prices = data["kelp_prices"]
+            else:
+                historical_prices = []
         else:
             data = {}
             historical_prices = []
         
         historical_prices.append(current_mid)
+        
+        # Keep only last 2 prices
         historical_prices = historical_prices[-2:]
+        
+        # Store updated prices back to data dictionary
         data["kelp_prices"] = historical_prices
+        
+        # Store data back to traderData in the run method
         self.data = data
         
-        # Calculate theo using EWM
+        # Calculate theo using EWM with span=3
         theo = 2000.0
         if len(historical_prices) >= 2:
-            alpha = 2 / (3 + 1)
-            theo = historical_prices[-1] * alpha + historical_prices[-2] * (1 - alpha)
+            # Simple implementation of EWM with span=3
+            alpha = 2/(3+1)  # alpha = 2/(span+1)
+            theo = (historical_prices[-1] * alpha + historical_prices[-2] * (1-alpha))
         elif len(historical_prices) == 1:
-            theo = historical_prices[0]
+            theo = (historical_prices[0])
         
         pos = self.get_position(state, "KELP")
         pos_max = position_limits["KELP"]
+
         orders: List[Order] = []
-        
-        # Adjust theo based on current position
-        theo -= max_hedge_displacement * (pos / pos_max)
-        
-        # Available capacity
+
+        # Hedge bias
+        #if abs(pos) > 3*pos_max / 4:
+        theo = (theo - max_hedge_displacement * (pos / pos_max))
+
+        # Calculate available buying and selling capacity
         buy_capacity = pos_max - pos
         sell_capacity = pos_max + pos
+
+        # Calculate order sizes for the two spreads (3/4 for first spread, 1/4 for second)
+        first_buy_size = buy_capacity # round(4* buy_capacity / 4)
+        second_buy_size = buy_capacity - first_buy_size
         
-        # Step 1: Take favorable prices that cross our theo (market taker)
-        if order_depth.sell_orders:
-            best_ask = min(order_depth.sell_orders)
-            if best_ask < theo:
-                # Take as much of the favorable ask as our capacity allows
-                ask_volume = -order_depth.sell_orders[best_ask]  # Negative because sell order
-                buy_volume = min(buy_capacity, ask_volume)
-                if buy_volume > 0:
-                    orders.append(Order("KELP", best_ask, buy_volume))
-                    buy_capacity -= buy_volume
+        first_sell_size = sell_capacity #round(4 * sell_capacity / 4)
+        second_sell_size = sell_capacity - first_sell_size
+
+        # First spread (tighter, at theo±threshold)
+        if first_buy_size > 0:
+            orders.append(Order("KELP", round(theo - threshold), first_buy_size))
         
-        if order_depth.buy_orders:
-            best_bid = max(order_depth.buy_orders)
-            if best_bid > theo:
-                # Take as much of the favorable bid as our capacity allows
-                bid_volume = order_depth.buy_orders[best_bid]
-                sell_volume = min(sell_capacity, bid_volume)
-                if sell_volume > 0:
-                    orders.append(Order("KELP", best_bid, -sell_volume))
-                    sell_capacity -= sell_volume
+        if first_sell_size > 0:
+            orders.append(Order("KELP", round(theo + threshold), -first_sell_size))
         
-        # Step 2: Use remaining capacity to place passive orders around theo (market maker)
-        # First spread (tight)
-        if buy_capacity > 0:
-            orders.append(Order("KELP", round(theo - threshold), buy_capacity))
+
+
+
+
+
+        # OLD STRATEGY
+        WINDOW_STARFRUIT = 8 # 6
+        orders = []
+        new_mean = get_weighted_mid_price(order_depth)
+
+        if state.timestamp == 0:
+            means_list = [0]*(WINDOW_STARFRUIT-1) + [new_mean]
+            data["KELP"] = means_list
+            return orders
         
-        if sell_capacity > 0:
-            orders.append(Order("KELP", round(theo + threshold), -sell_capacity))
+        means_list = jsonpickle.decode(state.traderData)["KELP"]
         
-        # Second spread (wider)
-        wider_threshold = threshold + 1
-        second_buy_size = max(0, pos_max - pos - buy_capacity)
-        second_sell_size = max(0, pos_max + pos - sell_capacity)
+        means_list.append(new_mean)
+        data["KELP"] = means_list[1:]  # "{:.2f}".format(number)
         
-        if second_buy_size > 0:
-            orders.append(Order("KELP", round(theo - wider_threshold), second_buy_size))
+        if state.timestamp < WINDOW_STARFRUIT*100:
+            return orders
         
-        if second_sell_size > 0:
-            orders.append(Order("KELP", round(theo + wider_threshold), -second_sell_size))
+        def exp_mean(data):
+            n = len(data)
+            weights = [1]*int(n/3) + [2]*(n - int(n/3))
+            return sum([data[i]*weights[i] for i in range(n)])/sum(weights)
         
-        print("mid:", current_mid, "theo:", theo, "orders:", orders)
+        mean = exp_mean(means_list) # sum(means_list)/len(means_list)
+
+        offset = float(pos)/50
+
+        buy_band = mean - 0.5 - offset
+        sell_band = mean + 0.5 - offset
+
+        orders.append(Order("KELP", round(buy_band), pos_max-pos))
+        orders.append(Order("KELP", round(sell_band), -pos_max-pos))
+        print("position: " + str(pos) + " buy_band: " + str(buy_band) + " sell_band: " + str(sell_band))
+        
+        self.data = data
+
         return orders
 
     def trade_squid(self):
@@ -156,7 +185,7 @@ class Trader:
     
     def run(self, state: TradingState):
 
-        #print("traderData: " + state.traderData)
+        print("traderData: " + state.traderData)
         #print("Observations: " + str(state.observations))
 
         # Deserialize traderData if it exists
