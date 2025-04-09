@@ -6,12 +6,11 @@ import pandas as pd
 import plotly.graph_objects as go
 import numpy as np
 import os
-import base64  # Add base64 import for decoding uploaded files
+import base64
 from datetime import datetime
 import re
-import traceback  # For better error reporting
-from utils2 import DataHandler  # Assuming DataHandler is defined in utils2.py
-
+import traceback
+from utils2 import DataHandler  # Using your DataHandler class
 
 # Initialize the Dash app
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
@@ -27,7 +26,7 @@ app.layout = dbc.Container([
         ], width=12)
     ]),
     
-    # File Selection Row
+    # File Selection Row - Simplified to just input and browse button
     dbc.Row([
         dbc.Col([
             dbc.InputGroup([
@@ -35,21 +34,6 @@ app.layout = dbc.Container([
                 dbc.Input(id="log-file-input", value=default_log_file, placeholder="Select log file..."),
                 dbc.Button("Browse", id="browse-button", color="primary"),
             ], className="mb-3"),
-            dcc.Upload(
-                id='upload-log',
-                children=html.Div(['Drag and Drop or ', html.A('Select Log File')]),
-                style={
-                    'width': '100%',
-                    'height': '60px',
-                    'lineHeight': '60px',
-                    'borderWidth': '1px',
-                    'borderStyle': 'dashed',
-                    'borderRadius': '5px',
-                    'textAlign': 'center',
-                    'margin': '10px'
-                },
-                multiple=False
-            ),
         ], width=12)
     ]),
     
@@ -59,22 +43,6 @@ app.layout = dbc.Container([
             dbc.Label("Select Product:"),
             dcc.Dropdown(id="product-dropdown", placeholder="Select a product"),
         ], width=4),
-        dbc.Col([
-            dbc.Label("Select Columns to Display:"),
-            dcc.Checklist(
-                id="column-checklist",
-                options=[
-                    {"label": "Bid Price 1", "value": "bid_price_1"},
-                    {"label": "Ask Price 1", "value": "ask_price_1"},
-                    {"label": "Mid Price", "value": "mid_price"},
-                    {"label": "Weighted Mid Price", "value": "weighted_mid_price"},
-                    {"label": "Spread %", "value": "spread_pct"},
-                    {"label": "Log Return", "value": "log_return"}
-                ],
-                value=["bid_price_1", "ask_price_1"],
-                inline=True
-            ),
-        ], width=8)
     ], className="mb-4"),
     
     # Main Chart Row
@@ -137,55 +105,25 @@ app.layout = dbc.Container([
      Output("left-axis-dropdown", "options"),
      Output("right-axis-dropdown", "options"),
      Output("product-dropdown", "value")],
-    [Input("log-file-input", "value"),
-     Input("upload-log", "contents")],
-    [State("upload-log", "filename")]
+    [Input("log-file-input", "value")]
 )
-def load_data(log_file_path, contents, filename):
-    ctx = callback_context
-    triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
+def load_data(log_file_path):
+    # If no log file specified or doesn't exist, use default
+    if not log_file_path or not os.path.exists(log_file_path):
+        log_file_path = DataHandler.get_most_recent_log()
+        if not log_file_path:
+            # No valid log file available
+            return None, None, [], [], [], None
     
-    # If triggered by upload
-    if triggered_id == "upload-log" and contents:
-        print(f"File upload triggered: {filename}")
-        try:
-            content_type, content_string = contents.split(',')
-            print(f"Content type: {content_type}")
-            print(f"Content string length: {len(content_string)}")
-            
-            # Decode the file contents
-            decoded = base64.b64decode(content_string)
-            print(f"Successfully decoded file, size: {len(decoded)} bytes")
-            
-            # Save temp file and load it
-            temp_file = f"temp_{datetime.now().strftime('%Y%m%d%H%M%S')}.log"
-            print(f"Saving to temporary file: {temp_file}")
-            
-            with open(temp_file, 'wb') as f:
-                f.write(decoded)
-            
-            print(f"Loading data from temporary file")
-            sandbox_logs, prices_df, trades_df = DataHandler.load_log_file(temp_file)
-            print(f"Loaded data: {len(prices_df)} price records, {len(trades_df)} trade records")
-            
-            os.remove(temp_file)  # Clean up
-            print(f"Removed temporary file")
-            
-            log_file_path = filename  # Update the input value
-        except Exception as e:
-            print(f"Error processing uploaded file: {e}")
-            print(traceback.format_exc())  # Print the full traceback for debugging
-            raise PreventUpdate
-    else:
-        # If no log file specified or doesn't exist, use default
-        if not log_file_path or not os.path.exists(log_file_path):
-            log_file_path = DataHandler.get_most_recent_log()
-            if not log_file_path:
-                # No valid log file available
-                return None, None, [], [], [], None
-        
-        # Load the log file
-        sandbox_logs,prices_df, trades_df = DataHandler.load_log_file(log_file_path)
+    # Load the log file
+    try:
+        print(f"Loading log file: {log_file_path}")
+        s, prices_df, trades_df = DataHandler.load_log_file(log_file_path)
+        print(f"Loaded data: {len(prices_df)} price records, {len(trades_df)} trade records")
+    except Exception as e:
+        print(f"Error loading log file: {e}")
+        print(traceback.format_exc())
+        return None, None, [], [], [], None
     
     if prices_df.empty:
         return None, None, [], [], [], None
@@ -194,16 +132,38 @@ def load_data(log_file_path, contents, filename):
     prices_dict = prices_df.to_dict('records')
     trades_dict = trades_df.to_dict('records') if not trades_df.empty else []
     
+    print(f"Prices DataFrame head:\n{prices_df.head()}")
+    
     # Get unique products for dropdown
-    products = prices_df['product'].unique().tolist() if 'product' in prices_df.columns else []
-    product_options = [{"label": product, "value": product} for product in products]
+    if 'product' in prices_df.columns:
+        products = [p for p in prices_df['product'].unique().tolist() 
+                    if p is not None and pd.notna(p) and str(p).strip() != '']
+    else:
+        products = []
+    
+    print(f"Found products: {products}")
+    
+    # Create valid options for dropdown - ensure no null values
+    product_options = [{"label": str(product), "value": str(product)} for product in products if product is not None]
+    
+    # If no valid options found, provide a default placeholder option
+    if not product_options:
+        product_options = [{"label": "No products available", "value": ""}]
+        print("No valid products found, using placeholder option")
+    else:
+        print(f"Created {len(product_options)} product options")
     
     # Get columns for axis dropdowns
     numeric_columns = prices_df.select_dtypes(include=['number']).columns.tolist()
     column_options = [{"label": col, "value": col} for col in numeric_columns]
     
-    # Set default product value
-    default_product = products[0] if products else None
+    # Set default product value - ensure it's not None or empty
+    if products and len(products) > 0:
+        default_product = str(products[0])
+        print(f"Setting default product to: {default_product}")
+    else:
+        default_product = None
+        print("No valid default product available")
     
     return prices_dict, trades_dict, product_options, column_options, column_options, default_product
 
@@ -211,10 +171,9 @@ def load_data(log_file_path, contents, filename):
     Output("main-chart", "figure"),
     [Input("prices-data-store", "data"),
      Input("trades-data-store", "data"),
-     Input("product-dropdown", "value"),
-     Input("column-checklist", "value")]
+     Input("product-dropdown", "value")]
 )
-def update_main_chart(prices_data, trades_data, selected_product, selected_columns):
+def update_main_chart(prices_data, trades_data, selected_product):
     if not prices_data or not selected_product:
         return {
             "data": [],
@@ -244,24 +203,68 @@ def update_main_chart(prices_data, trades_data, selected_product, selected_colum
     # Create figure
     fig = go.Figure()
     
-    # Add traces based on selected columns
-    colors = {
-        "bid_price_1": "blue",
-        "ask_price_1": "red",
-        "mid_price": "black",
-        "weighted_mid_price": "purple",
-        "spread_pct": "orange",
-        "log_return": "green"
+    # Define colors and visibility for different column types
+    column_settings = {
+        "bid_price_1": {"color": "blue", "width": 2, "visible": True},
+        "ask_price_1": {"color": "red", "width": 2, "visible": True},
+        "mid_price": {"color": "black", "width": 2.5, "visible": True},
+        "weighted_mid_price": {"color": "purple", "width": 1.5, "visible": "legendonly"},
+        "spread_pct": {"color": "orange", "width": 1, "visible": "legendonly"},
+        "log_return": {"color": "green", "width": 1, "visible": "legendonly"}
     }
     
-    for column in selected_columns:
+    # Add price columns
+    price_columns = []
+    
+    # Find all bid and ask price columns
+    for col in product_prices.columns:
+        if re.match(r'bid_price_\d+', col) or re.match(r'ask_price_\d+', col):
+            price_columns.append(col)
+    
+    # Add other standard columns
+    standard_columns = ["mid_price", "weighted_mid_price", "spread_pct", "log_return"]
+    for col in standard_columns:
+        if col in product_prices.columns:
+            price_columns.append(col)
+    
+    # Add any remaining numeric columns
+    numeric_cols = product_prices.select_dtypes(include=['number']).columns
+    for col in numeric_cols:
+        if col not in price_columns and col != 'timestamp' and not col.startswith('bid_volume') and not col.startswith('ask_volume'):
+            price_columns.append(col)
+    
+    # Add all price columns to the plot
+    for column in price_columns:
         if column in product_prices.columns:
+            # Determine settings for this column
+            if column in column_settings:
+                color = column_settings[column]["color"]
+                width = column_settings[column]["width"]
+                visible = column_settings[column]["visible"]
+            else:
+                # For bid prices (other than bid_price_1)
+                if column.startswith('bid_price_'):
+                    color = "lightblue"
+                    width = 1
+                    visible = "legendonly"
+                # For ask prices (other than ask_price_1)
+                elif column.startswith('ask_price_'):
+                    color = "lightpink"
+                    width = 1
+                    visible = "legendonly"
+                # For other columns
+                else:
+                    color = "gray"
+                    width = 1
+                    visible = "legendonly"
+            
             fig.add_trace(go.Scatter(
                 x=product_prices.index if 'timestamp' not in product_prices.columns else product_prices['timestamp'],
                 y=product_prices[column],
                 mode='lines',
                 name=column,
-                line=dict(color=colors.get(column, "gray"), width=2),
+                line=dict(color=color, width=width),
+                visible=visible,
                 hovertemplate=f'{column}: %{{y:.2f}}<br>Index: %{{x}}'
             ))
     
@@ -276,7 +279,8 @@ def update_main_chart(prices_data, trades_data, selected_product, selected_colum
                 mode='markers',
                 name='Buy Trades',
                 marker=dict(color='green', size=8, symbol='circle'),
-                hovertemplate='Price: %{y:.2f}<br>Timestamp: %{x}'
+                hovertemplate='Price: %{y:.2f}<br>Timestamp: %{x}<br>Quantity: %{text}',
+                text=buy_trades['quantity'] if 'quantity' in buy_trades.columns else ''
             ))
         
         # Sell trades
@@ -288,7 +292,8 @@ def update_main_chart(prices_data, trades_data, selected_product, selected_colum
                 mode='markers',
                 name='Sell Trades',
                 marker=dict(color='red', size=8, symbol='circle'),
-                hovertemplate='Price: %{y:.2f}<br>Timestamp: %{x}'
+                hovertemplate='Price: %{y:.2f}<br>Timestamp: %{x}<br>Quantity: %{text}',
+                text=sell_trades['quantity'] if 'quantity' in sell_trades.columns else ''
             ))
     
     # Update layout
@@ -359,47 +364,98 @@ def update_order_book(selected_timestamp, prices_data, selected_product):
         closest_idx = min(int(selected_timestamp), len(product_prices) - 1) if isinstance(selected_timestamp, (int, float)) else 0
         closest_row = product_prices.iloc[closest_idx]
     
-    # Create order book display
-    book_columns = [col for col in closest_row.index if re.match(r'(bid|ask)_(price|volume)_\d+', col)]
+    # Extract bid and ask data
+    bid_price_cols = [col for col in closest_row.index if col.startswith('bid_price_')]
+    bid_volume_cols = [col for col in closest_row.index if col.startswith('bid_volume_')]
+    ask_price_cols = [col for col in closest_row.index if col.startswith('ask_price_')]
+    ask_volume_cols = [col for col in closest_row.index if col.startswith('ask_volume_')]
     
-    if not book_columns:
+    if not bid_price_cols or not ask_price_cols:
         return html.Div("Order book data not available")
     
-    # Extract bid and ask columns
-    bid_price_cols = sorted([col for col in book_columns if col.startswith('bid_price')])
-    bid_volume_cols = sorted([col for col in book_columns if col.startswith('bid_volume')])
-    ask_price_cols = sorted([col for col in book_columns if col.startswith('ask_price')])
-    ask_volume_cols = sorted([col for col in book_columns if col.startswith('ask_volume')])
+    # Sort columns by level
+    bid_price_cols.sort(key=lambda x: int(x.split('_')[-1]))
+    bid_volume_cols.sort(key=lambda x: int(x.split('_')[-1]))
+    ask_price_cols.sort(key=lambda x: int(x.split('_')[-1]))
+    ask_volume_cols.sort(key=lambda x: int(x.split('_')[-1]))
     
-    # Create table header
+    # Create bid and ask dictionaries
+    bids = {}
+    for price_col, vol_col in zip(bid_price_cols, bid_volume_cols):
+        price = closest_row[price_col]
+        volume = closest_row[vol_col]
+        if pd.notna(price) and pd.notna(volume) and volume > 0:
+            # Round to integer price
+            int_price = int(price)
+            if int_price in bids:
+                bids[int_price] += volume
+            else:
+                bids[int_price] = volume
+    
+    asks = {}
+    for price_col, vol_col in zip(ask_price_cols, ask_volume_cols):
+        price = closest_row[price_col]
+        volume = closest_row[vol_col]
+        if pd.notna(price) and pd.notna(volume) and volume > 0:
+            # Round to integer price
+            int_price = int(price)
+            if int_price in asks:
+                asks[int_price] += volume
+            else:
+                asks[int_price] = volume
+    
+    # If no valid bids or asks, return message
+    if not bids or not asks:
+        return html.Div("No valid order book data available")
+    
+    # Find price range
+    min_price = min(min(bids.keys()), min(asks.keys()))
+    max_price = max(max(bids.keys()), max(asks.keys()))
+    
+    # Create price range with integer steps
+    price_range = list(range(min_price, max_price + 1))
+    
+    # Find maximum volume for color scaling
+    max_bid_vol = max(bids.values()) if bids else 1
+    max_ask_vol = max(asks.values()) if asks else 1
+    max_vol = max(max_bid_vol, max_ask_vol)
+    
+    # Create table rows for order book
+    table_rows = []
+    
+    # Header row
     header_row = html.Tr([
-        html.Th("Bid Vol", style={"width": "25%", "text-align": "center"}),
-        html.Th("Bid Price", style={"width": "25%", "text-align": "center"}),
-        html.Th("Ask Price", style={"width": "25%", "text-align": "center"}),
-        html.Th("Ask Vol", style={"width": "25%", "text-align": "center"})
+        html.Th("Bid Volume", style={"width": "30%", "text-align": "center"}),
+        html.Th("Price", style={"width": "40%", "text-align": "center"}),
+        html.Th("Ask Volume", style={"width": "30%", "text-align": "center"})
     ])
+    table_rows.append(header_row)
     
-    # Create table rows
-    table_rows = [header_row]
-    max_levels = max(len(bid_price_cols), len(ask_price_cols))
-    
-    for i in range(max_levels):
-        bid_price = closest_row[bid_price_cols[i]] if i < len(bid_price_cols) else "-"
-        bid_vol = closest_row[bid_volume_cols[i]] if i < len(bid_volume_cols) else "-"
-        ask_price = closest_row[ask_price_cols[i]] if i < len(ask_price_cols) else "-"
-        ask_vol = closest_row[ask_volume_cols[i]] if i < len(ask_volume_cols) else "-"
+    # Data rows
+    for price in sorted(price_range, reverse=True):
+        bid_vol = bids.get(price, 0)
+        ask_vol = asks.get(price, 0)
         
-        # Format numbers
-        bid_price = f"{bid_price:.2f}" if isinstance(bid_price, (int, float)) else bid_price
-        bid_vol = f"{bid_vol:.0f}" if isinstance(bid_vol, (int, float)) else bid_vol
-        ask_price = f"{ask_price:.2f}" if isinstance(ask_price, (int, float)) else ask_price
-        ask_vol = f"{ask_vol:.0f}" if isinstance(ask_vol, (int, float)) else ask_vol
+        # Calculate color intensity based on volume
+        bid_color_intensity = min(0.9, (bid_vol / max_vol) * 0.9) if bid_vol > 0 else 0
+        ask_color_intensity = min(0.9, (ask_vol / max_vol) * 0.9) if ask_vol > 0 else 0
+        
+        bid_color = f"rgba(0, 0, 255, {bid_color_intensity})" if bid_vol > 0 else "transparent"
+        ask_color = f"rgba(255, 0, 0, {ask_color_intensity})" if ask_vol > 0 else "transparent"
+        
+        # Format volumes as strings, blank if zero
+        bid_vol_str = f"{bid_vol:.0f}" if bid_vol > 0 else ""
+        ask_vol_str = f"{ask_vol:.0f}" if ask_vol > 0 else ""
+        
+        # Highlight mid price
+        price_style = {"text-align": "center"}
+        if 'mid_price' in closest_row and abs(closest_row['mid_price'] - price) < 0.5:
+            price_style.update({"font-weight": "bold", "background-color": "#f8f9fa"})
         
         row = html.Tr([
-            html.Td(bid_vol, style={"text-align": "center", "background-color": "#e6f7ff"}),
-            html.Td(bid_price, style={"text-align": "center", "background-color": "#e6f7ff"}),
-            html.Td(ask_price, style={"text-align": "center", "background-color": "#ffebee"}),
-            html.Td(ask_vol, style={"text-align": "center", "background-color": "#ffebee"})
+            html.Td(bid_vol_str, style={"text-align": "center", "background-color": bid_color}),
+            html.Td(f"{price}", style=price_style),
+            html.Td(ask_vol_str, style={"text-align": "center", "background-color": ask_color})
         ])
         
         table_rows.append(row)
@@ -407,21 +463,41 @@ def update_order_book(selected_timestamp, prices_data, selected_product):
     # Create the table
     table = dbc.Table(table_rows, bordered=True, hover=True, responsive=True, striped=False)
     
-    # Additional information
+    # Additional information (mid price, spread, etc.)
     info_items = []
+    important_keys = ['mid_price', 'weighted_mid_price', 'spread_pct', 'log_return']
+    
+    for key in important_keys:
+        if key in closest_row:
+            value = closest_row[key]
+            if pd.notna(value):
+                formatted_value = f"{value:.4f}" if isinstance(value, (int, float)) else value
+                info_items.append(html.Div([
+                    html.Strong(f"{key}: "), 
+                    html.Span(formatted_value)
+                ], className="mb-1"))
+    
+    # Add a spacer
+    info_items.append(html.Hr(style={"margin": "10px 0"}))
+    
+    # Add other info
     for key, value in closest_row.items():
-        if key not in book_columns and key not in ['day', 'timestamp', 'product']:
-            formatted_value = f"{value:.4f}" if isinstance(value, (int, float)) else value
-            info_items.append(html.Div([
-                html.Strong(f"{key}: "), 
-                html.Span(formatted_value)
-            ], className="mb-1"))
+        if (key not in important_keys and 
+            key not in bid_price_cols and key not in bid_volume_cols and 
+            key not in ask_price_cols and key not in ask_volume_cols and
+            key not in ['day', 'timestamp', 'product']):
+            if pd.notna(value):
+                formatted_value = f"{value:.4f}" if isinstance(value, (int, float)) else value
+                info_items.append(html.Div([
+                    html.Strong(f"{key}: "), 
+                    html.Span(formatted_value)
+                ], className="mb-1"))
     
     return html.Div([
         html.H5("Order Book", className="text-center mb-3"),
         table,
         html.Hr(),
-        html.H5("Additional Info", className="text-center mb-3"),
+        html.H5("Price Info", className="text-center mb-3"),
         html.Div(info_items)
     ])
 
@@ -509,7 +585,19 @@ def update_comparison_chart(prices_data, left_column, right_column, left_product
     [Input("product-dropdown", "options")]
 )
 def update_product_dropdowns(product_options):
-    return product_options, product_options
+    # Validate options to ensure no null values
+    valid_options = []
+    for option in product_options:
+        if isinstance(option, dict) and 'label' in option and 'value' in option:
+            if option['label'] is not None and option['value'] is not None:
+                valid_options.append(option)
+    
+    # If no valid options, provide a default
+    if not valid_options:
+        valid_options = [{"label": "No products available", "value": ""}]
+        
+    print(f"Updating product dropdowns with {len(valid_options)} valid options")
+    return valid_options, valid_options
 
 # Run the app
 if __name__ == '__main__':

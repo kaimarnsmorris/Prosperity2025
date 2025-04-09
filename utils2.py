@@ -95,7 +95,9 @@ class DataHandler:
         df = pd.read_csv(StringIO(activities_text), sep=';')
         
         # Convert all columns except 'product' to numeric
-        df.iloc[:, 1:] = df.iloc[:, 1:].apply(pd.to_numeric, errors='coerce')
+        for col in df.columns:
+            if col != 'product':
+                df[col] = pd.to_numeric(df[col], errors='coerce')
         
         return df
 
@@ -137,6 +139,19 @@ class DataHandler:
         return max(list_of_files, key=os.path.getctime) if list_of_files else None
 
 
+if __name__ == "__main__":
+    # Example usage
+    log_file_path = DataHandler.get_most_recent_log()
+    if log_file_path:
+        sandbox_logs, prices_log, trade_history = DataHandler.load_log_file(log_file_path)
+        print("Sandbox Logs:")
+        print(sandbox_logs.head())
+        print("\nPrices Log:")
+        print(prices_log.head())
+        print("\nTrade History:")
+        print(trade_history.head())
+    else:
+        print("No log files found.")
 
 
 
